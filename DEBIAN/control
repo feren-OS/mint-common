@@ -1,7 +1,7 @@
 Package: mint-common
-Version: 2.3.1
+Version: 2.4.6+feren-actually2.3.1
 Architecture: all
-Maintainer: Clement Lefebvre <root@linuxmint.com>
+Maintainer: Feren OS Team <ferenos@outlook.com>
 Installed-Size: 428
 Depends: python3, python3-aptdaemon, python3-aptdaemon.gtk3widgets, python3-gi, gir1.2-gtk-3.0, gir1.2-xapp-1.0, gir1.2-appstreamglib-1.0, mint-translations, libgtk3-perl
 Section: admin
