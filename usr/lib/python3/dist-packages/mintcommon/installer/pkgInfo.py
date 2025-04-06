@@ -4,9 +4,10 @@ if sys.version_info.major < 3:
 import os
 
 import gi
-gi.require_version("AppStreamGlib", "1.0")
 gi.require_version("Gtk", "3.0")
-from gi.repository import AppStreamGlib, Gtk
+from gi.repository import Gtk
+
+from .misc import warn, xml_markup_convert_to_text
 
 # this should hopefully be supplied by remote info someday.
 FLATHUB_MEDIA_BASE_URL = "https://dl.flathub.org/media/"
@@ -18,6 +19,31 @@ def capitalize(string):
         return (string)
 
 class PkgInfo:
+    __slots__ = (
+        "name",
+        "pkg_hash",
+        "refid",
+        "remote",
+        "kind",
+        "arch",
+        "branch",
+        "commit",
+        "remote_url",
+        "display_name",
+        "summary",
+        "description",
+        "version",
+        "icon",
+        "screenshots",
+        "homepage_url",
+        "help_url",
+        "categories",
+        "installed",
+        "verified",
+        "developer",
+        "keywords"
+    )
+
     def __init__(self, pkg_hash=None):
         # Saved stuff
         self.pkg_hash = None
@@ -26,7 +52,7 @@ class PkgInfo:
 
         self.name = None
         # some flatpak-specific things
-        self.refid=""
+        self.refid = ""
         self.remote = ""
         self.kind = 0
         self.arch = ""
@@ -38,11 +64,13 @@ class PkgInfo:
         self.display_name = None
         self.summary = None
         self.description = None
+        self.developer = None
         self.version = None
         self.icon = {}
         self.screenshots = []
         self.homepage_url = None
         self.help_url = None
+        self.keywords = None
 
         # Runtime categories
         self.categories = []
@@ -51,23 +79,44 @@ class AptPkgInfo(PkgInfo):
     def __init__(self, pkg_hash=None, apt_pkg=None):
         super(AptPkgInfo, self).__init__(pkg_hash)
 
+        # This is cheap.. but keeps from having an additional fp/apt check every time we check it.
+        self.verified = True
+
         if apt_pkg:
             self.name = apt_pkg.name
+            self.display_name = self.get_display_name(apt_pkg)
+            self.summary = self.get_summary(apt_pkg)
+            self.get_icon(apt_pkg, 48)
+            self.get_icon(apt_pkg, 64)
 
     @classmethod
     def from_json(cls, json_data:dict):
         inst = cls()
         inst.pkg_hash = json_data["pkg_hash"]
         inst.name = json_data["name"]
+        inst.display_name = json_data["display_name"]
+        inst.summary = json_data["summary"]
+
+        try:
+            cached = json_data["icon"]
+
+            while True:
+                size, icon = cached.popitem()
+                inst.icon[int(size)] = icon
+        except Exception as e:
+            pass
 
         return inst
 
     def to_json(self):
-        trimmed_dict = {}
-
-        for key in ("pkg_hash",
-                    "name"):
-            trimmed_dict[key] = self.__dict__[key]
+        trimmed_dict = {
+            key: getattr(self, key, None)
+                for key in ("pkg_hash",
+                            "name",
+                            "display_name",
+                            "summary",
+                            "icon")
+            }
 
         return trimmed_dict
 
@@ -127,7 +176,10 @@ class AptPkgInfo(PkgInfo):
 
         return self.description
 
-    def get_icon(self, pkginfo, apt_pkg=None, size=64):
+    def get_keywords(self):
+        return ""
+
+    def get_icon(self, apt_pkg=None, size=64):
         try:
             return self.icon[size]
         except:
@@ -135,7 +187,7 @@ class AptPkgInfo(PkgInfo):
 
         theme = Gtk.IconTheme.get_default()
 
-        for name in [pkginfo.name, pkginfo.name.split(":")[0], pkginfo.name.split("-")[0], pkginfo.name.split(".")[-1].lower()]:
+        for name in [self.name, self.name.split(":")[0], self.name.split("-")[0], self.name.split(".")[-1].lower()]:
             if theme.has_icon(name):
                 self.icon[size] = name
                 return self.icon[size]
@@ -143,12 +195,12 @@ class AptPkgInfo(PkgInfo):
         # Look in app-install-data and pixmaps
         for extension in ['svg', 'png', 'xpm']:
             for suffix in ['', '-icon']:
-                icon_path = "/usr/share/app-install/icons/%s%s.%s" % (pkginfo.name, suffix, extension)
+                icon_path = "/usr/share/app-install/icons/%s%s.%s" % (self.name, suffix, extension)
                 if os.path.exists(icon_path):
                     self.icon[size] = icon_path
                     return self.icon[size]
 
-                icon_path = "/usr/share/pixmaps/%s.%s" % (pkginfo.name, extension)
+                icon_path = "/usr/share/pixmaps/%s.%s" % (self.name, extension)
                 if os.path.exists(icon_path):
                     self.icon[size] = icon_path
                     return self.icon[size]
@@ -166,7 +218,8 @@ class AptPkgInfo(PkgInfo):
             if apt_pkg.is_installed:
                 self.version = apt_pkg.installed.version
             else:
-                self.version = apt_pkg.candidate.version
+                if apt_pkg.candidate is not None:
+                    self.version = apt_pkg.candidate.version
 
         if self.version is None:
             self.version = ""
@@ -181,7 +234,8 @@ class AptPkgInfo(PkgInfo):
             if apt_pkg.is_installed:
                 self.homepage_url = apt_pkg.installed.homepage
             else:
-                self.homepage_url = apt_pkg.candidate.homepage
+                if apt_pkg.candidate is not None:
+                    self.homepage_url = apt_pkg.candidate.homepage
 
         if self.homepage_url is None:
             self.homepage_url = ""
@@ -210,6 +264,7 @@ class FlatpakPkgInfo(PkgInfo):
         self.arch = ref.get_arch()
         self.branch = ref.get_branch()
         self.commit = ref.get_commit()
+        self.verified = False
 
     @classmethod
     def from_json(cls, json_data:dict):
@@ -223,13 +278,18 @@ class FlatpakPkgInfo(PkgInfo):
         inst.branch = json_data["branch"]
         inst.commit = json_data["commit"]
         inst.remote_url = json_data["remote_url"]
-
+        inst.verified = json_data["verified"]
+        inst.display_name = json_data["display_name"]
+        inst.summary = json_data["summary"]
+        inst.icon = json_data["icon"]
+        inst.keywords = json_data["keywords"]
         return inst
 
     def to_json(self):
-        trimmed_dict = {}
-
-        for key in ("pkg_hash",
+        trimmed_dict = {
+            key: getattr(self, key, None)
+                for key in (
+                    "pkg_hash",
                     "name",
                     "refid",
                     "remote",
@@ -237,169 +297,139 @@ class FlatpakPkgInfo(PkgInfo):
                     "arch",
                     "branch",
                     "commit",
-                    "remote_url"):
-            trimmed_dict[key] = self.__dict__[key]
+                    "remote_url",
+                    "verified",
+                    "display_name",
+                    "summary",
+                    "icon",
+                    "keywords"
+                )
+            }
 
         return trimmed_dict
 
-    def get_display_name(self, as_component=None):
-        # fastest
-        if self.display_name:
-            return self.display_name
+    def add_cached_appstream_data(self, as_pkg):
+        if as_pkg:
+            self.display_name = as_pkg.get_display_name()
 
-        if as_component:
-            display_name = as_component.get_name()
+            summary = as_pkg.get_summary()
+            if summary is None:
+                summary = ""
 
-            if display_name is not None:
-                self.display_name = capitalize(display_name)
+            self.summary = summary
+            self.icon["48"] = as_pkg.get_icon(48)
+            self.verified = as_pkg.get_verified()
 
-        if self.display_name is None:
+            try:
+                self.keywords = ",".join(as_pkg.get_keywords())
+            except TypeError:
+                self.keywords = ""
+        else:
             self.display_name = self.name
+            self.summary = ""
+            self.icon = {}
+            self.verified = False
+            self.keywords = ""
 
+    def get_display_name(self):
         return self.display_name
 
-    def get_summary(self, as_component=None):
-        # fastest
-        if self.summary:
-            return self.summary
-
-        if as_component:
-            summary = as_component.get_comment()
-
-            if summary is not None:
-                self.summary = summary
-
-        if self.summary is None:
-            self.summary = ""
-
+    def get_summary(self):
         return self.summary
 
-    def get_description(self, as_component=None):
-        # fastest
+    def get_description(self, as_pkg=None):
         if self.description:
             return self.description
 
-        if as_component:
-            description = as_component.get_description()
-
+        if as_pkg:
+            description = as_pkg.get_description()
             if description is not None:
-                description = description.replace("<p>", "").replace("</p>", "\n")
-                for tags in ["<ul>", "</ul>", "<li>", "</li>"]:
-                    description = description.replace(tags, "")
-                self.description = capitalize(description)
+                self.description = xml_markup_convert_to_text(description)
 
         if self.description is None:
-            self.description = ""
+            return ""
 
         return self.description
 
-    def get_icon(self, pkginfo, as_component=None, size=64):
+    def get_keywords(self):
+        return self.keywords
+
+    def get_icon(self, size=64, as_pkg=None):
         try:
-            return self.icon[size]
-        except:
+            return self.icon[str(size)]
+        except KeyError:
             pass
 
-        if as_component:
-            icons = as_component.get_icons()
+        if as_pkg:
+            icon = as_pkg.get_icon(size)
+            if icon:
+                self.icon[str(size)] = icon
+                return icon
 
-            if icons:
-                icon_to_use = None
-                remote_icon = None
-                local_exists_icon = None
-                good_size_icon = None
+        return None
 
-                for icon in icons:
-                    if icon.get_kind() == AppStreamGlib.IconKind.REMOTE:
-                        remote_icon = icon
-                        continue
-
-                    if icon.get_kind() in (AppStreamGlib.IconKind.LOCAL,  \
-                                           AppStreamGlib.IconKind.CACHED, \
-                                           AppStreamGlib.IconKind.STOCK):
-                        test_path = os.path.join(icon.get_prefix(), icon.get_name())
-                        if not os.path.exists(test_path):
-                            continue
-                        else:
-                            local_exists_icon = icon
-
-                        if size <= icon.get_height() or ("%dx%d" % (size, size)) in icon.get_prefix():
-                            good_size_icon = icon
-                            break
-
-                icon_to_use = good_size_icon or local_exists_icon or remote_icon
-                if icon_to_use is not None:
-                    kind = icon_to_use.get_kind()
-
-                    if kind != AppStreamGlib.IconKind.REMOTE:
-                        self.icon[size] = os.path.join(icon_to_use.get_prefix(), icon_to_use.get_name())
-                    else:
-                        url = icon_to_use.get_url()
-                        if not url.startswith("http") and self.remote == "flathub":
-                            url = FLATHUB_MEDIA_BASE_URL + url
-                        self.icon[size] = url
-                else:
-                    # All else fails, try using the package's name (which icon names should match for flatpaks).
-                    # You may end up with a third-party icon, but it's better than none.
-                    self.icon[size] = pkginfo.name
-
-        try:
-            return self.icon[size]
-        except:
-            return None
-
-    def get_screenshots(self, as_component=None):
+    def get_screenshots(self, as_pkg=None):
         if len(self.screenshots) > 0:
             return self.screenshots
 
-        if as_component:
-            self.screenshots = as_component.get_screenshots()
+        if as_pkg:
+            self.screenshots = as_pkg.get_screenshots()
 
         return self.screenshots
 
-    def get_version(self, as_component=None):
+    def get_version(self, as_pkg=None):
         if self.version:
-            # as_component.get_release_default().get_version()
             return self.version
 
-        if as_component:
-            releases = as_component.get_releases()
-
-            if len(releases) > 0:
-                releases.sort(key=lambda r: r.get_timestamp(), reverse=True)
-                version = releases[0].get_version()
-
-                if version:
-                    self.version = version
+        if as_pkg:
+            version = as_pkg.get_version()
+            if version:
+                self.version = version
 
         if self.version is None:
-            self.version = ""
+            return ""
 
         return self.version
 
-    def get_homepage_url(self, as_component=None):
+    def get_developer(self, as_pkg=None):
+        if self.developer:
+            return self.developer
+
+        if as_pkg:
+            self.developer = as_pkg.get_developer()
+
+        if self.developer is None:
+            return ""
+
+        return self.developer
+
+    def get_homepage_url(self, as_pkg=None):
         if self.homepage_url:
             return self.homepage_url
 
-        if as_component:
-            url = as_component.get_url_item(AppStreamGlib.UrlKind.HOMEPAGE)
+        if as_pkg:
+            url = as_pkg.get_homepage_url()
 
             if url is not None:
                 self.homepage_url = url
 
+        if self.homepage_url is None:
+            return ""
+
         return self.homepage_url
 
-    def get_help_url(self, as_component=None):
+    def get_help_url(self, as_pkg=None):
         if self.help_url:
             return self.help_url
 
-        if as_component:
-            url = as_component.get_url_item(AppStreamGlib.UrlKind.HELP)
+        if as_pkg:
+            url = as_pkg.get_help_url()
 
             if url is not None:
                 self.help_url = url
 
         if self.help_url is None:
-            self.help_url = ""
+            return ""
 
         return self.help_url
 

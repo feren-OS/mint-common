@@ -4,8 +4,6 @@ from pathlib import Path
 import json
 import threading
 
-import gi
-gi.require_version('AppStream', '1.0')
 from gi.repository import GLib, GObject
 
 from . import _apt
@@ -20,19 +18,27 @@ USER_CACHE_PATH = os.path.join(GLib.get_user_cache_dir(), "mintinstall", "pkginf
 
 MAX_AGE = 7 * (60 * 60 * 24) # days
 
-class CacheLoadingException(Exception):
+CACHE_SCHEMA_VERSION = 3
+
+class CacheLoadingError(Exception):
     """Thrown when there was an issue loading the pickled package set"""
 
 class JsonObject(object):
     def __init__(self, pkginfo_cache, section_lists, flatpak_remote_infos):
         super(JsonObject, self).__init__()
 
+        self.schema_version = CACHE_SCHEMA_VERSION
         self.pkginfo_cache = pkginfo_cache
         self.section_lists = section_lists
         self.flatpak_remote_infos = flatpak_remote_infos
 
     @classmethod
     def from_json(cls, json_data: dict):
+        schema_version = json_data.get("schema_version", 0)
+        if schema_version != CACHE_SCHEMA_VERSION:
+            warn("PkgCache schema version doesn't match, regenerating cache")
+            return None
+
         pkgcache_dict = {}
         for key in json_data["pkginfo_cache"].keys():
             pkginfo_data = json_data["pkginfo_cache"][key]
@@ -77,7 +83,7 @@ class PkgCache(object):
 
         try:
             cache, sections, flatpak_remote_infos = self._load_cache()
-        except CacheLoadingException:
+        except CacheLoadingError:
             cache = {}
             sections = {}
             flatpak_remote_infos = {}
@@ -193,7 +199,7 @@ class PkgCache(object):
         path = self._get_best_load_path()
 
         if path is None:
-            raise CacheLoadingException
+            raise CacheLoadingError
         try:
             with path.open(mode='r', encoding="utf8") as f:
                 json_obj = JsonObject.from_json(json.load(f))
@@ -205,7 +211,7 @@ class PkgCache(object):
             cache = None
 
         if cache is None:
-            raise CacheLoadingException
+            raise CacheLoadingError
 
         return cache, sections, flatpak_remote_infos
 
@@ -252,6 +258,7 @@ class PkgCache(object):
             if self.cache_content == "f":
                 for key in [key for key in self._items.keys() if key.startswith("a")]:
                     cache[key] = self._items[key]
+                sections = self.sections
             elif self.cache_content == "a":
                 for key in [key for key in self._items.keys() if key.startswith("f")]:
                     cache[key] = self._items[key]
@@ -288,14 +295,14 @@ class PkgCache(object):
         self._new_cache_common()
 
     def find_pkginfo(self, string, pkg_type=None, remote=None):
-        if pkg_type in (None, "a"):
-            pkginfo = _apt.find_pkginfo(self, string)
-
-            if pkginfo is not None:
-                return pkginfo
-
-        if self.have_flatpak:
-            if pkg_type in (None, "f"):
+        if pkg_type == "a" and not string.startswith("apt:"):
+            string = "apt:" + string
+        try:
+            return self[string]
+        except KeyError:
+            if string[0:4] == "apt:":
+                return None
+            if self.have_flatpak:
                 pkginfo = _flatpak.find_pkginfo(self, string, remote)
                 if pkginfo is not None:
                     return pkginfo
